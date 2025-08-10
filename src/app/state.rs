@@ -78,6 +78,7 @@ pub struct LabelRule {
 pub enum LeftPanelTab {
     Watch,
     Labels,
+    Suspects,
 }
 
 /// Top-level state for the running app.
@@ -130,6 +131,25 @@ pub struct AppState {
 
     /// Active left panel tab.
     pub left_panel_tab: LeftPanelTab,
+
+    // Suspected data rules and form state
+    pub suspect_rules: Vec<crate::app::suspects::SuspectRule>,
+    pub new_suspect_name: String,
+    pub new_suspect_range: String,
+    pub new_suspect_kind: crate::app::suspects::ExpectedKind,
+    pub new_suspect_value: String,
+    pub new_suspect_target: WatchTarget,
+    pub new_suspect_severity: crate::app::suspects::Severity,
+    pub edit_suspect_idx: Option<usize>,
+    pub edit_suspect_name: String,
+    pub edit_suspect_range: String,
+    pub edit_suspect_kind: crate::app::suspects::ExpectedKind,
+    pub edit_suspect_value: String,
+    pub edit_suspect_target: WatchTarget,
+    pub edit_suspect_severity: crate::app::suspects::Severity,
+
+    /// Global critical alert flag for UI feedback.
+    pub critical_active: bool,
 }
 
 impl Default for AppState {
@@ -165,6 +185,21 @@ impl Default for AppState {
             edit_label_range: String::new(),
             edit_label_value_hex: String::new(),
             left_panel_tab: LeftPanelTab::Watch,
+            suspect_rules: Vec::new(),
+            new_suspect_name: String::new(),
+            new_suspect_range: String::new(),
+            new_suspect_kind: crate::app::suspects::ExpectedKind::Text,
+            new_suspect_value: String::new(),
+            new_suspect_target: WatchTarget::All,
+            edit_suspect_idx: None,
+            edit_suspect_name: String::new(),
+            edit_suspect_range: String::new(),
+            edit_suspect_kind: crate::app::suspects::ExpectedKind::Text,
+            edit_suspect_value: String::new(),
+            edit_suspect_target: WatchTarget::All,
+            new_suspect_severity: crate::app::suspects::Severity::Warning,
+            edit_suspect_severity: crate::app::suspects::Severity::Warning,
+            critical_active: false,
         }
     }
 }

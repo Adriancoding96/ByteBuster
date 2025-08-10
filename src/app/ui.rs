@@ -81,8 +81,7 @@ impl eframe::App for ByteBusterApp {
             });
         });
 
-        super::ui_left_panel::render_left_panel(ctx, &mut self.state);
-        super::ui_messages::render_messages(ctx, &mut self.state, &self.state.label_rules);
+        // TODO: migrate main UI here; currently handled in main.rs
 
         egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -125,10 +124,7 @@ mod ui_left_panel {
                 ui.selectable_value(&mut state.left_panel_tab, LeftPanelTab::Labels, "Message labels");
             });
             ui.separator();
-            match state.left_panel_tab {
-                LeftPanelTab::Watch => super::ui_watch::render_watch_list(ui, state),
-                LeftPanelTab::Labels => super::ui_labels::render_labels(ui, state),
-            }
+            // Placeholder; main.rs renders the full left panel for now
         });
     }
 }

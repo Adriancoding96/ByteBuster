@@ -1,3 +1,4 @@
+mod app;
 use crossbeam_channel::{bounded, select, Receiver, Sender};
 use eframe::egui;
 use log::{error, info};
@@ -5,372 +6,10 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::thread;
 use std::time::Duration;
-use std::fmt;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WatchView {
-    Hex,
-    Text,
-    Binary,
-}
-
-impl fmt::Display for WatchView {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WatchView::Hex => write!(f, "Hex"),
-            WatchView::Text => write!(f, "Text"),
-            WatchView::Binary => write!(f, "Binary"),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum WatchTarget {
-    All,
-    Label(String),
-}
-
-impl fmt::Display for WatchTarget {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WatchTarget::All => write!(f, "All messages"),
-            WatchTarget::Label(name) => write!(f, "{}", name),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct WatchItem {
-    name: String,
-    start_index: usize,
-    end_index: usize,
-    view: WatchView,
-    target: WatchTarget,
-}
-
-#[derive(Clone, Debug)]
-struct LabelRule {
-    name: String,
-    start_index: usize,
-    end_index: usize,
-    value: Vec<u8>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LeftPanelTab {
-    Watch,
-    Labels,
-    Suspects,
-}
-
-struct AppState {
-    address_input: String,
-    is_connected: bool,
-    tx_to_writer: Option<Sender<Vec<u8>>>,
-    rx_from_reader: Option<Receiver<Vec<u8>>>,
-    received_messages: Vec<Vec<u8>>,
-    max_messages: usize,
-    display_as_text: bool,
-    start_pattern: String,
-    end_pattern: String,
-    unit_size: usize,
-    send_hex_input: String,
-    watch_items: Vec<WatchItem>,
-    new_watch_name: String,
-    new_watch_range: String,
-    edit_watch_idx: Option<usize>,
-    edit_watch_name: String,
-    edit_watch_range: String,
-    new_watch_view: WatchView,
-    edit_watch_view: WatchView,
-    new_watch_target: WatchTarget,
-    edit_watch_target: WatchTarget,
-    label_rules: Vec<LabelRule>,
-    new_label_name: String,
-    new_label_range: String,
-    new_label_value_hex: String,
-    edit_label_idx: Option<usize>,
-    edit_label_name: String,
-    edit_label_range: String,
-    edit_label_value_hex: String,
-    left_panel_tab: LeftPanelTab,
-
-    // Suspected data rules
-    suspect_rules: Vec<SuspectRule>,
-    new_suspect_name: String,
-    new_suspect_range: String,
-    new_suspect_kind: ExpectedKind,
-    new_suspect_value: String,
-    new_suspect_target: WatchTarget,
-    edit_suspect_idx: Option<usize>,
-    edit_suspect_name: String,
-    edit_suspect_range: String,
-    edit_suspect_kind: ExpectedKind,
-    edit_suspect_value: String,
-    edit_suspect_target: WatchTarget,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            address_input: "127.0.0.1:9000".to_string(),
-            is_connected: false,
-            tx_to_writer: None,
-            rx_from_reader: None,
-            received_messages: Vec::new(),
-            max_messages: 200,
-            display_as_text: false,
-            start_pattern: "AA 55".to_string(),
-            end_pattern: "0D 0A".to_string(),
-            unit_size: 1,
-            send_hex_input: String::new(),
-            watch_items: Vec::new(),
-            new_watch_name: String::new(),
-            new_watch_range: String::new(),
-            edit_watch_idx: None,
-            edit_watch_name: String::new(),
-            edit_watch_range: String::new(),
-            new_watch_view: WatchView::Hex,
-            edit_watch_view: WatchView::Hex,
-            new_watch_target: WatchTarget::All,
-            edit_watch_target: WatchTarget::All,
-
-            label_rules: Vec::new(),
-            new_label_name: String::new(),
-            new_label_range: String::new(),
-            new_label_value_hex: String::new(),
-            edit_label_idx: None,
-            edit_label_name: String::new(),
-            edit_label_range: String::new(),
-            edit_label_value_hex: String::new(),
-
-            left_panel_tab: LeftPanelTab::Watch,
-
-            suspect_rules: Vec::new(),
-            new_suspect_name: String::new(),
-            new_suspect_range: String::new(),
-            new_suspect_kind: ExpectedKind::Text,
-            new_suspect_value: String::new(),
-            new_suspect_target: WatchTarget::All,
-            edit_suspect_idx: None,
-            edit_suspect_name: String::new(),
-            edit_suspect_range: String::new(),
-            edit_suspect_kind: ExpectedKind::Text,
-            edit_suspect_value: String::new(),
-            edit_suspect_target: WatchTarget::All,
-        }
-    }
-}
-
-fn parse_hex_bytes(input: &str) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    for token in input.split_whitespace() {
-        let cleaned = token.trim_start_matches("0x").trim_start_matches("0X");
-        if cleaned.is_empty() {
-            continue;
-        }
-        let b = u8::from_str_radix(cleaned, 16).map_err(|e| format!("invalid hex '{}': {}", token, e))?;
-        bytes.push(b);
-    }
-    Ok(bytes)
-}
-
-fn parse_index_range(input: &str) -> Option<(usize, usize)> {
-    let s = input.trim();
-    if s.is_empty() { return None; }
-    if let Some((a, b)) = s.split_once('-') {
-        let start = a.trim().parse::<usize>().ok()?;
-        let end = b.trim().parse::<usize>().ok()?;
-        Some((start, end))
-    } else if let Ok(idx) = s.parse::<usize>() {
-        Some((idx, idx))
-    } else if let Some((a, b)) = s.split_once("..") {
-        let start = a.trim().parse::<usize>().ok()?;
-        let end = b.trim().parse::<usize>().ok()?;
-        Some((start, end))
-    } else {
-        None
-    }
-}
-
-fn format_bytes_for_view(bytes: &[u8], view: WatchView) -> String {
-    match view {
-        WatchView::Hex => hex::encode_upper(bytes),
-        WatchView::Text => String::from_utf8_lossy(bytes).to_string(),
-        WatchView::Binary => {
-            let mut out = String::new();
-            for (i, b) in bytes.iter().enumerate() {
-                if i > 0 { out.push(' '); }
-                out.push_str(&format!("{:08b}", b));
-            }
-            out
-        }
-    }
-}
-
-fn find_message_label(message: &[u8], rules: &[LabelRule]) -> Option<String> {
-    for r in rules {
-        let start = r.start_index;
-        let end = r.end_index;
-        if start <= end && end < message.len() {
-            let slice = &message[start..=end];
-            if slice.len() == r.value.len() && slice == r.value.as_slice() {
-                return Some(r.name.clone());
-            }
-        }
-    }
-    None
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExpectedKind {
-    Text,
-    Hex,
-}
-
-#[derive(Clone, Debug)]
-struct SuspectRule {
-    name: String,
-    start_index: usize,
-    end_index: usize,
-    expected_kind: ExpectedKind,
-    expected_value: String,
-    target: WatchTarget,
-}
-
-fn check_suspects_for_message(
-    message: &[u8],
-    active_label: &Option<String>,
-    rules: &[SuspectRule],
-) -> Vec<String> {
-    let mut warnings = Vec::new();
-    for r in rules {
-        let applies = match (&r.target, active_label) {
-            (WatchTarget::All, _) => true,
-            (WatchTarget::Label(t), Some(lbl)) => t == lbl,
-            (WatchTarget::Label(_), None) => false,
-        };
-        if !applies { continue; }
-        if r.start_index > r.end_index || r.end_index >= message.len() { continue; }
-        let slice = &message[r.start_index..=r.end_index];
-        let ok = match r.expected_kind {
-            ExpectedKind::Text => {
-                let found = String::from_utf8_lossy(slice);
-                found == r.expected_value
-            }
-            ExpectedKind::Hex => {
-                if let Ok(exp) = parse_hex_bytes(&r.expected_value) {
-                    exp.as_slice() == slice
-                } else { false }
-            }
-        };
-        if !ok {
-            let got_repr = match r.expected_kind {
-                ExpectedKind::Text => String::from_utf8_lossy(slice).to_string(),
-                ExpectedKind::Hex => format!("0x{}", hex::encode_upper(slice)),
-            };
-            warnings.push(format!(
-                "{}: expected {} at [{}..{}], got {}",
-                r.name,
-                match r.expected_kind { ExpectedKind::Text => r.expected_value.clone(), ExpectedKind::Hex => format!("0x{}", r.expected_value) },
-                r.start_index,
-                r.end_index,
-                got_repr
-            ));
-        }
-    }
-    warnings
-}
-
-fn spawn_connection(address: String) -> (Sender<Vec<u8>>, Receiver<Vec<u8>>, thread::JoinHandle<()>, thread::JoinHandle<()>) {
-    let (tx_to_writer, rx_for_writer) = bounded::<Vec<u8>>(1024);
-    let (tx_from_reader, rx_from_reader) = bounded::<Vec<u8>>(1024);
-    let stream = TcpStream::connect(address.clone()).expect("failed to connect");
-    stream
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .ok();
-    let stream_reader = stream.try_clone().expect("clone stream failed");
-    let stream_writer = stream;
-
-    let reader_handle = thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        let mut local_stream = stream_reader;
-        loop {
-            match local_stream.read(&mut buf) {
-                Ok(0) => {
-                    // connection closed
-                    break;
-                }
-                Ok(n) => {
-                    let chunk = buf[..n].to_vec();
-                    if tx_from_reader.send(chunk).is_err() {
-                        break;
-                    }
-                }
-                Err(_e) => {
-                    // timeout or error; just continue polling
-                }
-            }
-        }
-    });
-
-    let writer_handle = thread::spawn(move || {
-        let mut local_stream = stream_writer;
-        loop {
-            select! {
-                recv(rx_for_writer) -> msg => {
-                    match msg {
-                        Ok(bytes) => {
-                            if let Err(e) = local_stream.write_all(&bytes) {
-                                error!("write error: {}", e);
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                default => { thread::sleep(Duration::from_millis(100)); }
-            }
-        }
-    });
-
-    (tx_to_writer, rx_from_reader, reader_handle, writer_handle)
-}
-
-fn frame_messages(buffer: &mut Vec<u8>, start: &[u8], end: &[u8]) -> Vec<Vec<u8>> {
-    // Very simple framing: find start then end sequences
-    let mut messages = Vec::new();
-    loop {
-        let start_pos = if start.is_empty() {
-            Some(0)
-        } else {
-            buffer.windows(start.len()).position(|w| w == start)
-        };
-
-        let s = match start_pos { Some(p) => p, None => break };
-        let after_start = s + start.len();
-        if after_start > buffer.len() { break; }
-
-        let end_pos = if end.is_empty() {
-            Some(buffer.len())
-        } else {
-            buffer[after_start..]
-                .windows(end.len())
-                .position(|w| w == end)
-                .map(|p| after_start + p)
-        };
-
-        let e = match end_pos { Some(p) => p, None => break };
-        let msg_end = e + end.len();
-        if msg_end <= buffer.len() {
-            messages.push(buffer[s..msg_end].to_vec());
-            buffer.drain(0..msg_end);
-        } else {
-            break;
-        }
-    }
-    messages
-}
+use app::suspects::{ExpectedKind, SuspectRule, check_suspects_for_message};
+use app::state::{AppState, parse_hex_bytes, parse_index_range, format_bytes_for_view, find_message_label, WatchView, WatchTarget, WatchItem, LabelRule, LeftPanelTab};
+use app::net::spawn_connection;
+use app::framing::frame_messages;
 
 struct ByteBusterApp {
     state: AppState,
@@ -415,6 +54,12 @@ impl eframe::App for ByteBusterApp {
         }
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
+            // Apply a base theme and tint the panels if a critical is active
+            let mut visuals = egui::Visuals::dark();
+            if self.state.critical_active {
+                visuals.panel_fill = egui::Color32::from_rgb(60, 20, 20);
+            }
+            ctx.set_visuals(visuals);
             ui.heading("ByteBuster");
             ui.horizontal(|ui| {
                 ui.label("Address");
@@ -489,7 +134,7 @@ impl eframe::App for ByteBusterApp {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.state.left_panel_tab, LeftPanelTab::Watch, "Watch list");
                 ui.selectable_value(&mut self.state.left_panel_tab, LeftPanelTab::Labels, "Message labels");
-                ui.selectable_value(&mut self.state.left_panel_tab, LeftPanelTab::Suspects, "Suspected data");
+                ui.selectable_value(&mut self.state.left_panel_tab, LeftPanelTab::Suspects, "Expected data");
             });
             ui.separator();
 
@@ -789,9 +434,9 @@ impl eframe::App for ByteBusterApp {
                     }
                 });
             } else {
-                ui.collapsing("Suspected data", |ui| {
+                ui.collapsing("Expected data", |ui| {
                     let mut to_start_edit: Option<usize> = None;
-                    let mut to_save: Option<(usize, String, usize, usize, ExpectedKind, String, WatchTarget)> = None;
+                    let mut to_save: Option<(usize, String, usize, usize, ExpectedKind, String, WatchTarget, app::suspects::Severity)> = None;
                     let mut to_delete: Option<usize> = None;
                     let mut cancel_edit: bool = false;
 
@@ -801,24 +446,32 @@ impl eframe::App for ByteBusterApp {
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
                                 let w = ui.available_width();
-                                ui.heading("Add suspect rule");
+                                ui.heading("Add expectation");
                                 ui.add_space(6.0);
                                 ui.label("Name");
                                 ui.add_sized([w, 0.0], egui::TextEdit::singleline(&mut self.state.new_suspect_name));
                                 ui.label("Index or range");
                                 ui.add_sized([w, 0.0], egui::TextEdit::singleline(&mut self.state.new_suspect_range).hint_text("e.g. 10-13"));
                                 ui.label("Expected kind");
-                                egui::ComboBox::from_id_source("suspect_kind_add")
-                                    .selected_text(match self.state.new_suspect_kind { ExpectedKind::Text => "Text", ExpectedKind::Hex => "Hex" })
+                                egui::ComboBox::from_id_source("suspect_kind_add").width(w)
+                                    .selected_text(match self.state.new_suspect_kind { app::suspects::ExpectedKind::Text => "Text", app::suspects::ExpectedKind::Hex => "Hex" })
                                     .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut self.state.new_suspect_kind, ExpectedKind::Text, "Text");
-                                        ui.selectable_value(&mut self.state.new_suspect_kind, ExpectedKind::Hex, "Hex");
+                                        ui.selectable_value(&mut self.state.new_suspect_kind, app::suspects::ExpectedKind::Text, "Text");
+                                        ui.selectable_value(&mut self.state.new_suspect_kind, app::suspects::ExpectedKind::Hex, "Hex");
+                                    });
+                                ui.label("Severity");
+                                egui::ComboBox::from_id_source("suspect_severity_add").width(w)
+                                    .selected_text(match self.state.new_suspect_severity { app::suspects::Severity::Info => "Info", app::suspects::Severity::Warning => "Warning", app::suspects::Severity::Critical => "Critical" })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.state.new_suspect_severity, app::suspects::Severity::Info, "Info");
+                                        ui.selectable_value(&mut self.state.new_suspect_severity, app::suspects::Severity::Warning, "Warning");
+                                        ui.selectable_value(&mut self.state.new_suspect_severity, app::suspects::Severity::Critical, "Critical");
                                     });
                                 ui.label("Expected value");
-                                let hint = match self.state.new_suspect_kind { ExpectedKind::Text => "e.g. PING", ExpectedKind::Hex => "e.g. 50 49 4E 47" };
+                                let hint = match self.state.new_suspect_kind { app::suspects::ExpectedKind::Text => "e.g. PING", app::suspects::ExpectedKind::Hex => "e.g. 50 49 4E 47" };
                                 ui.add_sized([w, 0.0], egui::TextEdit::singleline(&mut self.state.new_suspect_value).hint_text(hint));
                                 ui.label("Target");
-                                egui::ComboBox::from_id_source("suspect_target_add")
+                                egui::ComboBox::from_id_source("suspect_target_add").width(w)
                                     .selected_text(self.state.new_suspect_target.to_string())
                                     .show_ui(ui, |ui| {
                                         ui.selectable_value(&mut self.state.new_suspect_target, WatchTarget::All, "All messages");
@@ -827,7 +480,7 @@ impl eframe::App for ByteBusterApp {
                                         }
                                     });
                                 ui.add_space(8.0);
-                                if ui.add_sized([w, 0.0], egui::Button::new("Add suspect")).clicked() {
+                                if ui.add_sized([w, 0.0], egui::Button::new("Add expectation")).clicked() {
                                     if let Some((s, e)) = parse_index_range(&self.state.new_suspect_range) {
                                         let (start, end) = if s <= e { (s, e) } else { (e, s) };
                                         self.state.suspect_rules.push(SuspectRule {
@@ -837,12 +490,14 @@ impl eframe::App for ByteBusterApp {
                                             expected_kind: self.state.new_suspect_kind,
                                             expected_value: self.state.new_suspect_value.clone(),
                                             target: self.state.new_suspect_target.clone(),
+                                            severity: self.state.new_suspect_severity,
                                         });
                                         self.state.new_suspect_name.clear();
                                         self.state.new_suspect_range.clear();
                                         self.state.new_suspect_value.clear();
-                                        self.state.new_suspect_kind = ExpectedKind::Text;
+                                        self.state.new_suspect_kind = app::suspects::ExpectedKind::Text;
                                         self.state.new_suspect_target = WatchTarget::All;
+                                        self.state.new_suspect_severity = app::suspects::Severity::Warning;
                                     }
                                 }
                             });
@@ -850,7 +505,7 @@ impl eframe::App for ByteBusterApp {
 
                     ui.add_space(6.0);
                     ui.separator();
-                    ui.label("Current suspect rules");
+                    ui.label("Current expectations");
                     ui.add_space(4.0);
 
                     for (i, r) in self.state.suspect_rules.iter().enumerate() {
@@ -868,15 +523,17 @@ impl eframe::App for ByteBusterApp {
                                         ui.add_sized([w, 0.0], egui::TextEdit::singleline(&mut self.state.edit_suspect_range));
                                         ui.label("Expected kind");
                                         egui::ComboBox::from_id_source(format!("suspect_kind_edit_{}", i))
-                                            .selected_text(match self.state.edit_suspect_kind { ExpectedKind::Text => "Text", ExpectedKind::Hex => "Hex" })
+                                            .width(w)
+                                            .selected_text(match self.state.edit_suspect_kind { app::suspects::ExpectedKind::Text => "Text", app::suspects::ExpectedKind::Hex => "Hex" })
                                             .show_ui(ui, |ui| {
-                                                ui.selectable_value(&mut self.state.edit_suspect_kind, ExpectedKind::Text, "Text");
-                                                ui.selectable_value(&mut self.state.edit_suspect_kind, ExpectedKind::Hex, "Hex");
+                                                ui.selectable_value(&mut self.state.edit_suspect_kind, app::suspects::ExpectedKind::Text, "Text");
+                                                ui.selectable_value(&mut self.state.edit_suspect_kind, app::suspects::ExpectedKind::Hex, "Hex");
                                             });
                                         ui.label("Expected value");
                                         ui.add_sized([w, 0.0], egui::TextEdit::singleline(&mut self.state.edit_suspect_value));
                                         ui.label("Target");
                                         egui::ComboBox::from_id_source(format!("suspect_target_edit_{}", i))
+                                            .width(w)
                                             .selected_text(self.state.edit_suspect_target.to_string())
                                             .show_ui(ui, |ui| {
                                                 ui.selectable_value(&mut self.state.edit_suspect_target, WatchTarget::All, "All messages");
@@ -884,12 +541,30 @@ impl eframe::App for ByteBusterApp {
                                                     ui.selectable_value(&mut self.state.edit_suspect_target, WatchTarget::Label(rule.name.clone()), rule.name.clone());
                                                 }
                                             });
+                                        ui.label("Severity");
+                                        egui::ComboBox::from_id_source(format!("suspect_severity_edit_{}", i))
+                                            .width(w)
+                                            .selected_text(match self.state.edit_suspect_severity { app::suspects::Severity::Info => "Info", app::suspects::Severity::Warning => "Warning", app::suspects::Severity::Critical => "Critical" })
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(&mut self.state.edit_suspect_severity, app::suspects::Severity::Info, "Info");
+                                                ui.selectable_value(&mut self.state.edit_suspect_severity, app::suspects::Severity::Warning, "Warning");
+                                                ui.selectable_value(&mut self.state.edit_suspect_severity, app::suspects::Severity::Critical, "Critical");
+                                            });
                                         ui.add_space(10.0);
                                         let save_clicked = ui.add_sized([w, 0.0], egui::Button::new("Save")).clicked();
                                         if save_clicked {
                                             if let Some((s, e)) = parse_index_range(&self.state.edit_suspect_range) {
                                                 let (start, end) = if s <= e { (s, e) } else { (e, s) };
-                                                to_save = Some((i, self.state.edit_suspect_name.clone(), start, end, self.state.edit_suspect_kind, self.state.edit_suspect_value.clone(), self.state.edit_suspect_target.clone()));
+                                                to_save = Some((
+                                                    i,
+                                                    self.state.edit_suspect_name.clone(),
+                                                    start,
+                                                    end,
+                                                    self.state.edit_suspect_kind,
+                                                    self.state.edit_suspect_value.clone(),
+                                                    self.state.edit_suspect_target.clone(),
+                                                    self.state.edit_suspect_severity,
+                                                ));
                                             }
                                         }
                                         ui.add_space(4.0);
@@ -899,8 +574,8 @@ impl eframe::App for ByteBusterApp {
                                     ui.vertical(|ui| {
                                         ui.strong(&r.name);
                                         ui.add_space(4.0);
-                                        let kind = match r.expected_kind { ExpectedKind::Text => "Text", ExpectedKind::Hex => "Hex" };
-                                        ui.monospace(format!("[{}..{}] {} -> {}", r.start_index, r.end_index, kind, r.expected_value));
+                                        let kind = match r.expected_kind { app::suspects::ExpectedKind::Text => "Text", app::suspects::ExpectedKind::Hex => "Hex" };
+                                        ui.monospace(format!("[{}..{}] {} -> {} ({})", r.start_index, r.end_index, kind, r.expected_value, match r.severity { app::suspects::Severity::Info => "Info", app::suspects::Severity::Warning => "Warning", app::suspects::Severity::Critical => "Critical" }));
                                         ui.add_space(8.0);
                                         ui.horizontal(|ui| {
                                             if ui.button("Edit").clicked() { to_start_edit = Some(i); }
@@ -919,9 +594,10 @@ impl eframe::App for ByteBusterApp {
                             self.state.edit_suspect_kind = r.expected_kind;
                             self.state.edit_suspect_value = r.expected_value.clone();
                             self.state.edit_suspect_target = r.target.clone();
+                            self.state.edit_suspect_severity = r.severity;
                         }
                     }
-                    if let Some((i, name, start, end, kind, value, target)) = to_save {
+                    if let Some((i, name, start, end, kind, value, target, severity)) = to_save {
                         if let Some(r) = self.state.suspect_rules.get_mut(i) {
                             r.name = name;
                             r.start_index = start;
@@ -929,6 +605,7 @@ impl eframe::App for ByteBusterApp {
                             r.expected_kind = kind;
                             r.expected_value = value;
                             r.target = target;
+                            r.severity = severity;
                         }
                         self.state.edit_suspect_idx = None;
                         self.state.edit_suspect_name.clear();
@@ -960,11 +637,13 @@ impl eframe::App for ByteBusterApp {
                 if ui.button("Clear").clicked() {
                     self.state.received_messages.clear();
                     self.incoming_buffer.clear();
+                    self.state.critical_active = false;
                 }
                 ui.add_space(8.0);
                 ui.checkbox(&mut self.state.display_as_text, "Display as text");
             });
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                let mut any_critical = false;
                 for (i, msg) in self.state.received_messages.iter().enumerate() {
                     ui.add_space(4.0);
                     egui::Frame::group(ui.style())
@@ -988,11 +667,17 @@ impl eframe::App for ByteBusterApp {
                                 ui.monospace(hex::encode_upper(msg));
                             }
                             // Suspected data warnings
-                            let active_label = find_message_label(msg, &self.state.label_rules);
+                    let active_label = find_message_label(msg, &self.state.label_rules);
                             let warnings = check_suspects_for_message(msg, &active_label, &self.state.suspect_rules);
-                            for w in warnings {
-                                ui.colored_label(egui::Color32::YELLOW, format!("Warning: {}", w));
-                            }
+                    let mut critical = false;
+                    for (sev, w) in warnings {
+                        let _ = match sev {
+                            app::suspects::Severity::Info => ui.label(format!("Note: {}", w)),
+                            app::suspects::Severity::Warning => ui.colored_label(egui::Color32::YELLOW, format!("Warning: {}", w)),
+                            app::suspects::Severity::Critical => { critical = true; ui.colored_label(egui::Color32::RED, format!("CRITICAL: {}", w)) }
+                        };
+                    }
+                    any_critical = any_critical || critical;
                             if !self.state.watch_items.is_empty() {
                                 ui.add_space(8.0);
                                 ui.separator();
@@ -1029,6 +714,8 @@ impl eframe::App for ByteBusterApp {
                             }
                         });
                 }
+                // Update global critical state based on this frame's evaluation across all messages
+                self.state.critical_active = any_critical;
             });
         });
 
