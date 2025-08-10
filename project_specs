@@ -1,0 +1,10 @@
+ByteBuster is a GUI application that helps you decode data from incoming data streams such as tcp
+
+functional requirements:
+    User needs to be able to input ip address to establish tcp connection with
+    User needs to be able to specify suspected start and end bytes
+    User needs to be able to specify amount of start and end bytes might be 1, 2 or 4
+    User needs to be able to automatically decode recived byte messages to common data formats such as text
+    numbers etc.
+    If user knows of specific indexes in data messages that contain certain information they should be ablel to be added on to a watch list
+    User needs to be able to send data in the form of bytes to the established connection
